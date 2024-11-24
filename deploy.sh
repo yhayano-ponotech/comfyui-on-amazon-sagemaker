@@ -55,6 +55,13 @@ configure() {
 
     # Authentication type for the Lambda URL (NONE or AWS_IAM)
     LAMBDA_URL_AUTH_TYPE="AWS_IAM"
+
+    # LINE Bot関連の設定を追加
+    LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET:-""}
+    LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN:-""}
+
+    # LINE Bot用のLambdaパッケージファイル名
+    LINE_BOT_LAMBDA_FILE="line-bot-lambda-$(line_bot_lambda_hash).zip"
 }
 
 # Collect variables from AWS environment
@@ -151,12 +158,12 @@ build_and_upload_model_artifact() {
 # Deploy CloudFormation
 deploy_cloudformation() {
     # first pack lambda package and upload to S3 bucket
-    cd lambda
+    cd lambda/comfyui
     zip -r $LAMBDA_FILE *
     aws s3 cp "$LAMBDA_FILE" "s3://$S3_BUCKET/lambda/$LAMBDA_FILE"
     cd -
 
-    # deploy cloudformation stack
+    # CloudFormationスタックのデプロイ
     echo "Deploying CloudFormation stack..."
     aws cloudformation deploy --template-file cloudformation/template.yml \
         --stack-name "$APP_NAME" \
@@ -165,19 +172,49 @@ deploy_cloudformation() {
         AppName="$APP_NAME" \
         DeploymentBucket="$S3_BUCKET" \
         LambdaPackageS3Key="lambda/$LAMBDA_FILE" \
+        LineBotLambdaS3Key="lambda/$LINE_BOT_LAMBDA_FILE" \
         ModelVersion="$MODEL_VERSION" \
         ModelDataS3Key="$MODEL_FILE" \
         ModelEcrImage="$IMAGE_REPO:$IMAGE_TAG" \
         SageMakerInstanceType="$SAGEMAKER_INSTANCE_TYPE" \
         SageMakerAutoScaling="$SAGEMAKER_AUTO_SCALING" \
-        LambdaUrlAuthType="$LAMBDA_URL_AUTH_TYPE"
+        LambdaUrlAuthType="$LAMBDA_URL_AUTH_TYPE" \
+        LineChannelSecret="$LINE_CHANNEL_SECRET" \
+        LineChannelAccessToken="$LINE_CHANNEL_ACCESS_TOKEN"
 
+    # CloudFormationスタックの出力を表示
     aws cloudformation describe-stacks \
         --stack-name "$APP_NAME" \
         --query 'Stacks[0].Outputs[*].{OutputKey:OutputKey,OutputValue:OutputValue}' \
         --output table
 }
 
+# LINE Bot Lambda用のハッシュ関数を追加
+line_bot_lambda_hash() {
+    tar \
+     --mtime="@0" \
+     --owner=0 --group=0 --numeric-owner \
+     --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
+     -cf - lambda/line_bot | md5sum | head -c 6
+}
+
+# LINE Bot Lambdaのデプロイ用関数を追加
+deploy_line_bot_lambda() {
+    # LINE Botの認証情報チェック
+    if [ -z "${LINE_CHANNEL_SECRET}" ] || [ -z "${LINE_CHANNEL_ACCESS_TOKEN}" ]; then
+        echo "Error: LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN must be set"
+        exit 1
+    fi
+
+    # LINE Bot Lambda用のパッケージを作成
+    cd lambda/line_bot
+    pip install -r requirements.txt -t .
+    zip -r $LINE_BOT_LAMBDA_FILE *
+    aws s3 cp "$LINE_BOT_LAMBDA_FILE" "s3://$S3_BUCKET/lambda/$LINE_BOT_LAMBDA_FILE"
+    cd -
+}
+
+# メイン処理フロー
 prepare_env
 configure
 prepare_ecr
@@ -185,5 +222,6 @@ prepare_s3
 login_ecr
 build_and_push_image
 build_and_upload_model_artifact
+deploy_line_bot_lambda  # 追加
 deploy_cloudformation
 echo "Done"

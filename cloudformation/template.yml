@@ -64,6 +64,14 @@ Parameters:
       - NONE
       - AWS_IAM
     Default: AWS_IAM
+  LineChannelSecret:
+    Type: String
+    Description: LINE Channel Secret
+    NoEcho: true
+  LineChannelAccessToken:
+    Type: String
+    Description: LINE Channel Access Token
+    NoEcho: true
 
 Conditions:
   LambdaUrlAuthTypeIsNone: !Equals
@@ -187,7 +195,7 @@ Resources:
       Role: !GetAtt ComfyUIFunctionRole.Arn
       Runtime: python3.12
       MemorySize: 256
-      Timeout : 120
+      Timeout: 120
       Architectures:
         - arm64
       Code:
@@ -211,10 +219,125 @@ Resources:
       FunctionUrlAuthType: "NONE"
       Principal: "*"
 
+  # API Gateway
+  ComfyUIApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${AppName}-api
+      Description: API for LINE Bot integration
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ComfyUIApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ComfyUIApi
+      ParentId: !GetAtt ComfyUIApi.RootResourceId
+      PathPart: webhook
+
+  ComfyUIApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ComfyUIApi
+      ResourceId: !Ref ComfyUIApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LineBotFunction.Arn}/invocations
+
+  ComfyUIApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ComfyUIApiMethod
+    Properties:
+      RestApiId: !Ref ComfyUIApi
+
+  ComfyUIApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ComfyUIApi
+      DeploymentId: !Ref ComfyUIApiDeployment
+      StageName: prod
+
+  # S3 Bucket for temporary image storage
+  ComfyUIImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AppName}-images-${AWS::AccountId}-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldFiles
+            Status: Enabled
+            ExpiresInDays: 1
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET]
+            AllowedOrigins: ["*"]
+            MaxAge: 3000
+
+  # LINE Bot Lambda Function
+  LineBotFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AppName}-line-bot
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LineBotFunctionRole.Arn
+      Code:
+        S3Bucket: !Sub ${DeploymentBucket}
+        S3Key: !Sub line-bot-lambda.zip
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          LINE_CHANNEL_SECRET: !Ref LineChannelSecret
+          LINE_CHANNEL_ACCESS_TOKEN: !Ref LineChannelAccessToken
+          COMFYUI_LAMBDA_ARN: !GetAtt ComfyUIFunction.Arn
+          IMAGE_BUCKET: !Ref ComfyUIImageBucket
+
+  LineBotFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppName}-line-bot-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AppName}-line-bot-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ComfyUIFunction.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:PutObjectAcl
+                Resource: !Sub ${ComfyUIImageBucket.Arn}/*
+
+  # API Gateway Permission
+  LineBotPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LineBotFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ComfyUIApi}/*/*
+
 Outputs:
-  ComfyUIFunctionUrl:
-    Description: Function URL of Lambda function
-    Value: !GetAtt ComfyUIFunctionUrl.FunctionUrl
-  ComfyUIEndpoint:
-    Description: Arn of SageMaker inference endpoint
-    Value: !Ref ComfyUIEndpoint
+  # 既存のOutputsに追加
+  WebhookUrl:
+    Description: Webhook URL for LINE Bot
+    Value: !Sub https://${ComfyUIApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook
