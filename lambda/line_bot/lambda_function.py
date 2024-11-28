@@ -78,7 +78,7 @@ def lambda_handler(event, context):
                 payload = {
                     "body": json.dumps({
                         "positive_prompt": prompt,
-                        "negative_prompt": "",
+                        "negative_prompt": "nsfw, nude, naked,",
                         "prompt_file": "workflow_api.json"
                     })
                 }
